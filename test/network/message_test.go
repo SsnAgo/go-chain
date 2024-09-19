@@ -1,15 +1,15 @@
 package network
 
-
 import (
 	"bytes"
+	"go-chain/core"
+	"go-chain/network"
 	"testing"
 	"github.com/stretchr/testify/assert"
-	"go-chain/core"
 )
 
 func TestGetBlocksMessage(t *testing.T) {
-	msg := &GetBlocksMessage{
+	msg := &network.GetBlocksMessage{
 		From: 1,
 		To:   10,
 	}
@@ -18,7 +18,7 @@ func TestGetBlocksMessage(t *testing.T) {
 	err := msg.Encode(&buf)
 	assert.NoError(t, err)
 
-	decodedMsg := &GetBlocksMessage{}
+	decodedMsg := &network.GetBlocksMessage{}
 	err = decodedMsg.Decode(&buf)
 	assert.NoError(t, err)
 
@@ -31,7 +31,7 @@ func TestBlocksMessage(t *testing.T) {
 		{Header: &core.BlockHeader{Height: 1}},
 		{Header: &core.BlockHeader{Height: 2}},
 	}
-	msg := &BlocksMessage{
+	msg := &network.BlocksMessage{
 		Blocks: blocks,
 	}
 
@@ -39,7 +39,7 @@ func TestBlocksMessage(t *testing.T) {
 	err := msg.Encode(&buf)
 	assert.NoError(t, err)
 
-	decodedMsg := &BlocksMessage{}
+	decodedMsg := &network.BlocksMessage{}
 	err = decodedMsg.Decode(&buf)
 	assert.NoError(t, err)
 
@@ -50,19 +50,19 @@ func TestBlocksMessage(t *testing.T) {
 }
 
 func TestGetStatusMessage(t *testing.T) {
-	msg := &GetStatusMessage{}
+	msg := &network.GetStatusMessage{}
 
 	var buf bytes.Buffer
 	err := msg.Encode(&buf)
 	assert.NoError(t, err)
 
-	decodedMsg := &GetStatusMessage{}
+	decodedMsg := &network.GetStatusMessage{}
 	err = decodedMsg.Decode(&buf)
 	assert.NoError(t, err)
 }
 
 func TestStatusMessage(t *testing.T) {
-	msg := &StatusMessage{
+	msg := &network.StatusMessage{
 		ID:            "testID",
 		Version:       1,
 		CurrentHeight: 100,
@@ -72,7 +72,7 @@ func TestStatusMessage(t *testing.T) {
 	err := msg.Encode(&buf)
 	assert.NoError(t, err)
 
-	decodedMsg := &StatusMessage{}
+	decodedMsg := &network.StatusMessage{}
 	err = decodedMsg.Decode(&buf)
 	assert.NoError(t, err)
 

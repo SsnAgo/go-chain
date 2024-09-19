@@ -150,6 +150,10 @@ func (s *Server) Start() error {
 	}
 
 	s.opts.log.Printf("服务器已在 %s 启动", s.opts.listenAddr)
+
+	// 启动每隔一段时间挖出区块并打包交易的逻辑
+	go s.mineLoop()
+
 	// 启动同步块协程
 	go s.syncBlocksLoop()
 
@@ -481,3 +485,42 @@ func (s *Server) RollBlockRange(fromHeight uint32) {
 
 	s.logf("成功移除从高度 %d 开始的区块，共回滚 %d 笔交易", fromHeight, len(rolledBackTxs))
 }
+
+// mineLoop 每隔一定时间挖出一个区块，并打包交易，同步给其他节点
+func (s *Server) mineLoop() {
+	ticker := time.NewTicker(100 * time.Second) // 每100秒挖一个区块
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			// 从交易池中获取待打包的交易
+			txs := s.pool.GetPendingTxs()
+			if len(txs) == 0 {
+				s.logf("当前没有待打包的交易，跳过本次挖矿")
+				continue
+			}
+			// 创建新区块
+			lastBlock := s.chain.GetLatestBlock()
+			newBlock := core.NewBlock(lastBlock.GetDataHash(), lastBlock.Height() + 1, txs)
+
+			// 将新区块添加到链上
+			if err := s.chain.AddBlock(newBlock); err != nil {
+				s.logf("添加新区块失败: %v", err)
+				continue
+			}
+
+			s.logf("成功挖出新区块，高度: %d, 包含 %d 笔交易", newBlock.Height(), len(newBlock.Transactions))
+
+			// 从交易池中移除已打包的交易
+			s.pool.ClearPending()
+
+			// 广播新区块给其他节点
+			go s.broadcastBlock(newBlock)
+
+		case <-s.quitCh:
+			return
+		}
+	}
+}
+
