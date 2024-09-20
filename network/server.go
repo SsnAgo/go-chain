@@ -157,6 +157,8 @@ func (s *Server) Start() error {
 	// 启动同步块协程
 	go s.syncBlocksLoop()
 
+	go s.syncMorePeers()
+
 	return nil
 }
 
@@ -294,13 +296,12 @@ func (s *Server) handleGetBlocksMessage(from net.Addr, body []byte) {
 	blocks := s.chain.GetRangeBlocks(getBs.From, getBs.To)
 	Bs := new(BlocksMessage)
 	Bs.Blocks = blocks
-	bb := bytes.NewBuffer(nil)
-	if err := Bs.Encode(bb); err != nil {
+	data, err := EncodeMessage(MessageTypeBlocks, Bs)
+	if err != nil {
 		s.logf("编码区块消息失败: %v", err)
 		return
 	}
-	// 将数据发送回去
-	s.send(from, bb.Bytes())
+	s.send(from, data)
 }
 
 func (s *Server) handleStatusMessage(from net.Addr, body []byte) {
@@ -319,27 +320,28 @@ func (s *Server) handleStatusMessage(from net.Addr, body []byte) {
 		getBs := new(GetBlocksMessage)
 		getBs.From = s.chain.Height() + 1
 		getBs.To = status.CurrentHeight
-		bb := bytes.NewBuffer(nil)
-		if err := getBs.Encode(bb); err != nil {
+		data, err := EncodeMessage(MessageTypeGetBlocks, getBs)
+		if err != nil {
 			s.logf("编码获取区块消息失败: %v", err)
+			return
 		}
-		s.send(from, bb.Bytes())
+		s.send(from, data)
 	}
 }
 
 func (s *Server) handleGetStatusMessage(from net.Addr) {
 	s.logf("处理来自 %s 的获取状态消息", from)
 	// 将状态发送回去
-	sm := StatusMessage{
+	sm := &StatusMessage{
 		ID:            s.opts.id,
 		CurrentHeight: s.chain.Height(),
 	}
-	bb := &bytes.Buffer{}
-	if err := sm.Encode(bb); err != nil {
+	data, err := EncodeMessage(MessageTypeStatus, sm)
+	if err != nil {
 		s.logf("编码状态消息失败: %v", err)
 		return
 	}
-	s.send(from, bb.Bytes())
+	s.send(from, data)
 }
 
 func (s *Server) handleBlocksMessage(from net.Addr, body []byte) {
@@ -384,12 +386,12 @@ func (s *Server) handleBlocksMessage(from net.Addr, body []byte) {
 }
 
 func (s *Server) broadcastTx(tx *core.Transaction) {
-	var buf bytes.Buffer
-	if err := tx.Encode(&buf); err != nil {
+	data, err := EncodeMessage(MessageTypeTx, tx)
+	if err != nil {
 		s.logf("编码交易失败: %v", err)
 		return
 	}
-	s.boardcast(buf.Bytes())
+	s.boardcast(data)
 }
 
 func (s *Server) boardcast(data []byte) {
@@ -402,12 +404,12 @@ func (s *Server) boardcast(data []byte) {
 }
 
 func (s *Server) broadcastBlock(block *core.Block) {
-	var buf bytes.Buffer
-	if err := block.Encode(&buf); err != nil {
+	data, err := EncodeMessage(MessageTypeBlock, block)
+	if err != nil {
 		s.logf("编码区块失败: %v", err)
 		return
 	}
-	s.boardcast(buf.Bytes())
+	s.boardcast(data)
 }
 
 func (s *Server) send(toAddr net.Addr, data []byte) error {
@@ -431,14 +433,15 @@ func (s *Server) syncBlocksLoop() error {
 			s.mu.RLock()
 			for addr, peer := range s.peerMap {
 				s.logf("向 %s 发送 GetStatus 消息", addr)
-				msg := &GetStatusMessage{}
-				var buf bytes.Buffer
-				if err := msg.Encode(&buf); err != nil {
-					s.logf("编码 GetStatus 消息失败: %v", err)
+
+				data, err := EncodeMessage(MessageTypeGetPeers, &GetStatusMessage{})
+				if err != nil {
+					s.logf("编码获取状态信息消息失败: %v", err)
 					continue
 				}
-				if err := peer.Send(buf.Bytes()); err != nil {
+				if err := peer.Send(data); err != nil {
 					s.logf("向 %s 发送 GetStatus 消息失败: %v", addr, err)
+					continue
 				}
 			}
 			s.mu.RUnlock()
@@ -523,4 +526,99 @@ func (s *Server) mineLoop() {
 		}
 	}
 }
+
+// syncMorePeers 向现有的peers同步他们的连接信息，并建立新的连接
+func (s *Server) syncMorePeers() {
+	ticker := time.NewTicker(5 * time.Minute) // 每5分钟同步一次
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.mu.RLock()
+			peers := make([]*TCPPeer, 0, len(s.peerMap))
+			for _, peer := range s.peerMap {
+				peers = append(peers, peer)
+			}
+			s.mu.RUnlock()
+
+			for _, peer := range peers {
+				// 向每个peer发送获取连接信息的请求
+				data, err := EncodeMessage(MessageTypeGetPeers, &GetPeersMessage{})
+				if err != nil {
+					s.logf("编码获取连接信息消息失败: %v", err)
+					continue
+				}
+				go s.send(peer.conn.RemoteAddr(), data)
+			}
+
+		case <-s.quitCh:
+			return
+		}
+	}
+}
+
+
+// handleGetPeersMessage 处理获取连接信息的请求
+func (s *Server) handleGetPeersMessage(from net.Addr) {
+	s.logf("处理来自 %s 的获取连接信息请求", from)
+
+	// 获取当前所有的peer连接信息
+	s.mu.RLock()
+	peers := make([]string, 0, len(s.peerMap))
+	for addr := range s.peerMap {
+		peers = append(peers, addr.String())
+	}
+	s.mu.RUnlock()
+
+	// 创建PeersMessage
+	peersMsg := &PeersMessage{
+		Peers: peers,
+	}
+
+	// 编码PeersMessage
+	data, err := EncodeMessage(MessageTypePeers, peersMsg)
+	if err != nil {
+		s.logf("编码连接信息消息失败: %v", err)
+		return
+	}
+
+	// 发送连接信息给请求方
+	s.send(from, data)
+}
+
+// handlePeersMessage 处理接收到的连接信息
+func (s *Server) handlePeersMessage(from net.Addr, body []byte) {
+	s.logf("处理来自 %s 的连接信息", from)
+
+	peersMsg := new(PeersMessage)
+	b := bytes.NewBuffer(body)
+	if err := peersMsg.Decode(b); err != nil {
+		s.logf("解析连接信息消息失败: %v", err)
+		return
+	}
+
+	for _, peerAddr := range peersMsg.Peers {
+		// 检查是否已经连接到该节点
+		s.mu.RLock()
+		_, exists := s.peerMap[NetAddr(peerAddr)]
+		if exists {
+			s.mu.RUnlock()
+			continue
+		}
+		s.mu.RUnlock()
+
+		if !exists && peerAddr != s.opts.listenAddr {
+			// 尝试连接新的节点
+			go func(addr string) {
+				if err := s.connectToNode(addr); err != nil {
+					s.logf("连接到新节点 %s 失败: %v", addr, err)
+				} else {
+					s.logf("成功连接到新节点: %s", addr)
+				}
+			}(peerAddr)
+		}
+	}
+}
+
 
